@@ -1,122 +1,187 @@
 #include <windows.h>
 #include <iostream>
 #include <fstream>
-#include <sstream>
 #include <string>
 #include <vector>
-#include <cctype>
+#include <unordered_map>
 #include <algorithm>
+#include <regex>
+#include <cstdio>  // for snprintf
 
-// Define control IDs
 #define ID_COMBO_INPUT_TYPE 101
 #define ID_EDIT_INPUT_VALUE 102
+#define ID_EDIT_X_VALUE     105
 #define ID_BUTTON_CALCULATE 103
-#define ID_STATIC_RESULT 104
+#define ID_STATIC_RESULT    104
 
-// Global handles
+// Global control handles
 HWND g_hComboInputType;
 HWND g_hEditInputValue;
+HWND g_hEditXValue;
 HWND g_hButtonCalculate;
 HWND g_hStaticResult;
 
-using namespace std;
+// File paths
+const char* FILE_TEMP = "A2.csv";
+const char* FILE_PRESS = "A3.csv";
 
-// Function to trim whitespace
-string trim(const string& str) {
-    size_t start = str.find_first_not_of(" \t");
-    size_t end = str.find_last_not_of(" \t");
-    return (start == string::npos || end == string::npos) ? "" : str.substr(start, end - start + 1);
+// Data structure optimized for fast lookup
+struct DataEntry {
+    float hf;
+    float hg;
+};
+
+// Use hash maps for O(1) lookup instead of linear search
+static std::unordered_map<float, DataEntry> g_tempDataMap;
+static std::unordered_map<float, DataEntry> g_presDataMap;
+
+// Pre-compiled regex for number validation (compile once, use many times)
+static const std::regex g_floatRegex(R"([-+]?[0-9]*\.?[0-9]+)");
+
+// Efficient string trimming function
+inline std::string trim(const std::string& str) {
+    const char* whitespace = " \t\r\n";
+    size_t start = str.find_first_not_of(whitespace);
+    if (start == std::string::npos) return "";
+    size_t end = str.find_last_not_of(whitespace);
+    return str.substr(start, end - start + 1);
 }
 
-// Perform calculation
-float calculateH(const string& filename, float inputValue) {
-    ifstream file(filename);
-    string line;
-    bool found = false;
-    float Hf = 0.0f, Hfg = 0.0f;
+bool loadData(const char* filename, std::unordered_map<float, DataEntry>& container) {
+    std::ifstream file(filename);
+    if (!file.is_open()) return false;
 
-    if (!file.is_open()) {
-        return -1;
-    }
-
-    while (getline(file, line)) {
+    std::string line;
+    // Skip header line
+    std::getline(file, line);
+    
+    // Reserve space to avoid rehashing
+    container.reserve(100);  // Assume about 100 entries
+    
+    while (std::getline(file, line)) {
         if (line.empty()) continue;
-
-        stringstream ss(line);
-        string cell;
-        vector<string> row;
-
-        while (getline(ss, cell, ',')) {
-            row.push_back(trim(cell));
+        
+        // Avoid stringstream which has overhead
+        size_t pos = 0, nextPos = 0;
+        std::vector<std::string> row;
+        row.reserve(8);  // We know we need 8 columns
+        
+        // Manual split is faster than getline with stringstream
+        while ((nextPos = line.find(',', pos)) != std::string::npos) {
+            row.push_back(trim(line.substr(pos, nextPos - pos)));
+            pos = nextPos + 1;
         }
-
-        if (all_of(row.begin(), row.end(), [](const string& s) { return s.empty(); })) continue;
-
+        row.push_back(trim(line.substr(pos)));
+        
         if (row.size() >= 8) {
             try {
-                float value = stof(row[0]);
-                if (value == inputValue) {
-                    Hf = stof(row[6]);
-                    Hfg = stof(row[7]);
-                    found = true;
-                    break;
-                }
+                float key = std::stof(row[0]);
+                float hf = std::stof(row[6]);
+                float hg = std::stof(row[7]);
+                container[key] = {hf, hg};  // O(1) insertion
             } catch (...) {
-                return -1;
+                // ignore malformed lines
             }
         }
     }
-
-    return found ? Hf + Hfg : -1;
+    return true;
 }
 
-// Main Window Procedure
+float calculateH(const std::unordered_map<float, DataEntry>& data, float inputValue, float x) {
+    auto it = data.find(inputValue);  // O(1) lookup
+    if (it != data.end()) {
+        return it->second.hf + x * (it->second.hg - it->second.hf);
+    }
+    return -1.0f;
+}
+
+bool validateInput(const char* input, float& value) {
+    std::string str = trim(input);
+    if (!std::regex_match(str, g_floatRegex)) {
+        return false;
+    }
+    value = std::stof(str);
+    return true;
+}
+
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
-        case WM_CREATE:
+        case WM_CREATE: {
+            // Create UI controls
+            CreateWindow("STATIC", "Input Type:", WS_VISIBLE | WS_CHILD,
+                20, 10, 120, 20, hwnd, NULL, NULL, NULL);
+
             g_hComboInputType = CreateWindow("COMBOBOX", "", WS_VISIBLE | WS_CHILD | CBS_DROPDOWNLIST,
-                20, 20, 150, 200, hwnd, (HMENU)ID_COMBO_INPUT_TYPE, NULL, NULL);
-            SendMessage(g_hComboInputType, CB_ADDSTRING, 0, (LPARAM)"Temperature");
-            SendMessage(g_hComboInputType, CB_ADDSTRING, 0, (LPARAM)"Pressure");
+                150, 10, 160, 120, hwnd, (HMENU)ID_COMBO_INPUT_TYPE, NULL, NULL);
+            SendMessage(g_hComboInputType, CB_ADDSTRING, 0, (LPARAM)"Temperature (°C)");
+            SendMessage(g_hComboInputType, CB_ADDSTRING, 0, (LPARAM)"Pressure (bar)");
             SendMessage(g_hComboInputType, CB_SETCURSEL, 0, 0);
 
+            CreateWindow("STATIC", "Enter Value:", WS_VISIBLE | WS_CHILD,
+                20, 45, 120, 20, hwnd, NULL, NULL, NULL);
             g_hEditInputValue = CreateWindow("EDIT", "", WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
-                20, 60, 150, 25, hwnd, (HMENU)ID_EDIT_INPUT_VALUE, NULL, NULL);
+                150, 45, 160, 25, hwnd, (HMENU)ID_EDIT_INPUT_VALUE, NULL, NULL);
+
+            CreateWindow("STATIC", "Enter x (0-1):", WS_VISIBLE | WS_CHILD,
+                20, 80, 120, 20, hwnd, NULL, NULL, NULL);
+            g_hEditXValue = CreateWindow("EDIT", "", WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
+                150, 80, 160, 25, hwnd, (HMENU)ID_EDIT_X_VALUE, NULL, NULL);
 
             g_hButtonCalculate = CreateWindow("BUTTON", "Calculate", WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-                20, 100, 150, 30, hwnd, (HMENU)ID_BUTTON_CALCULATE, NULL, NULL);
+                20, 120, 290, 30, hwnd, (HMENU)ID_BUTTON_CALCULATE, NULL, NULL);
 
             g_hStaticResult = CreateWindow("STATIC", "Result: ", WS_VISIBLE | WS_CHILD,
-                20, 150, 250, 25, hwnd, (HMENU)ID_STATIC_RESULT, NULL, NULL);
+                20, 165, 290, 25, hwnd, (HMENU)ID_STATIC_RESULT, NULL, NULL);
 
-            CreateWindow("STATIC", "Input Type:", WS_VISIBLE | WS_CHILD,
-                20, 5, 100, 20, hwnd, NULL, NULL, NULL);
-
-            CreateWindow("STATIC", "Enter Value:", WS_VISIBLE | WS_CHILD,
-                20, 45, 100, 20, hwnd, NULL, NULL, NULL);
+            // Load data files
+            if (!loadData(FILE_TEMP, g_tempDataMap)) {
+                MessageBox(hwnd, "Failed to load temperature data.", "Error", MB_ICONERROR);
+            }
+            if (!loadData(FILE_PRESS, g_presDataMap)) {
+                MessageBox(hwnd, "Failed to load pressure data.", "Error", MB_ICONERROR);
+            }
             break;
+        }
 
-        case WM_COMMAND:
+        case WM_COMMAND: {
             if (LOWORD(wParam) == ID_BUTTON_CALCULATE) {
-                int selectedIndex = SendMessage(g_hComboInputType, CB_GETCURSEL, 0, 0);
-                string filename = (selectedIndex == 0) ? "A2.csv" : "A3.csv";
+                char bufVal[64];
+                GetWindowText(g_hEditInputValue, bufVal, sizeof(bufVal));
+                
+                float inputVal;
+                if (!validateInput(bufVal, inputVal)) {
+                    SetWindowText(g_hStaticResult, "Result: Invalid input value");
+                    return 0;
+                }
 
-                char buffer[256];
-                GetWindowText(g_hEditInputValue, buffer, 256);
+                char bufX[64];
+                GetWindowText(g_hEditXValue, bufX, sizeof(bufX));
+                
+                float x;
+                if (!validateInput(bufX, x)) {
+                    SetWindowText(g_hStaticResult, "Result: Invalid x value");
+                    return 0;
+                }
+                
+                if (x < 0.0f || x > 1.0f) {
+                    SetWindowText(g_hStaticResult, "Result: x must be between 0 and 1");
+                    return 0;
+                }
 
-                try {
-                    float inputVal = stof(buffer);
-                    float h = calculateH(filename, inputVal);
+                int idx = SendMessage(g_hComboInputType, CB_GETCURSEL, 0, 0);
+                const auto& data = (idx == 0) ? g_tempDataMap : g_presDataMap;
 
-                    string result = (h != -1)
-                        ? "Result: Calculated h = " + to_string(h)
-                        : "Result: Calculation failed";
-                    SetWindowText(g_hStaticResult, result.c_str());
-                } catch (...) {
-                    SetWindowText(g_hStaticResult, "Result: Invalid input");
+                float h = calculateH(data, inputVal, x);
+                if (h < 0.0f) {
+                    SetWindowText(g_hStaticResult, "Result: Calculation failed");
+                } else {
+                    char resBuf[64];
+                    snprintf(resBuf, sizeof(resBuf), "Result: h = %.3f", h);
+                    SetWindowText(g_hStaticResult, resBuf);
                 }
             }
             break;
+        }
 
         case WM_CLOSE:
             DestroyWindow(hwnd);
@@ -129,26 +194,29 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         default:
             return DefWindowProc(hwnd, uMsg, wParam, lParam);
     }
-
     return 0;
 }
 
-// Entry Point
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     const char CLASS_NAME[] = "SteamCalculatorWindow";
-
+    
     WNDCLASS wc = {};
-    wc.lpfnWndProc = WindowProc;
-    wc.hInstance = hInstance;
+    wc.lpfnWndProc   = WindowProc;
+    wc.hInstance     = hInstance;
     wc.lpszClassName = CLASS_NAME;
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
 
-    RegisterClass(&wc);
+    if (!RegisterClass(&wc)) return 0;
 
-    HWND hwnd = CreateWindow(CLASS_NAME, "Steam Property Calculator", WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 300, 250, NULL, NULL, hInstance, NULL);
-
+    HWND hwnd = CreateWindow(
+        CLASS_NAME, 
+        "Steam Table Calculator", 
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, 350, 250, 
+        NULL, NULL, hInstance, NULL
+    );
+    
     if (!hwnd) return 0;
 
     ShowWindow(hwnd, nCmdShow);
@@ -159,6 +227,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-
+    
     return 0;
 }
